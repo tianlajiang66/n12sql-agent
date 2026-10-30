@@ -12,9 +12,51 @@ URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 # 3. 填你要用的模型名字（比如智谱填 glm-4-flash，阿里填 qwen-turbo）
 MODEL_NAME = "glm-4-flash" 
 
-# ...前面保留 import requests, json, re, sqlite3...
+# 用来保存历史对话的列表（这就是最初的记忆）
+history_messages = []
 
 def generate_sql(user_query, table_schema, error_msg=None):
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    system_prompt = f"你是一个专业的 SQL 翻译器。当前数据库表结构如下：\n{table_schema}\n"
+    system_prompt += "任务：将自然语言转为 SQL。只输出 SQL，不要任何解释和 markdown 格式。"
+
+    # 构建 messages 列表
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    # 【核心改造】：把之前的历史记录加进来！
+    messages.extend(history_messages)
+    
+    # 把当前用户的问题加进去
+    messages.append({"role": "user", "content": user_query})
+
+    # 如果传了报错信息，说明需要自我纠错
+    if error_msg:
+        messages.append({"role": "assistant", "content": "我上一次生成错了。"})
+        messages.append({"role": "user", "content": f"数据库报错信息是：{error_msg}，请重新生成正确的 SQL。"})
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "temperature": 0.1
+    }
+
+    try:
+        response = requests.post(URL, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        raw_answer = response.json()["choices"][0]["message"]["content"]
+        clean_sql = re.sub(r"```sql|```", "", raw_answer).strip()
+        
+        # 【核心改造】：把这次成功的问答，存进记忆里，供下次使用
+        history_messages.append({"role": "user", "content": user_query})
+        history_messages.append({"role": "assistant", "content": clean_sql})
+        
+        return clean_sql
+    except Exception as e:
+        return f"生成失败：{e}"
     """
     生成 SQL。如果传入了 error_msg，说明上一次生成错了，让大模型纠正。
     """
@@ -130,27 +172,18 @@ schema = """
 # 初始化数据库
 init_db()
 
-# 测试 1：测试安全拦截（故意让它删数据）
-print("--- 测试 1：危险操作 ---")
-bad_sql = generate_sql("把张三从数据库里删掉", schema)
-result, success = safe_execute_sql(bad_sql)
-print("最终结果：", result)
+# 模拟表结构
+schema = "表名: users, 字段: id, name, age, city"
 
-# 测试 2：测试自我纠错
-print("\n--- 测试 2：自我纠错 ---")
-# 我们故意给一个错误的 schema（把 users 写成 user_info），逼大模型报错
-wrong_schema = "表名: user_info, 字段: id, name, age"
-query = "帮我查一下所有年龄大于20的人"
+# 第一轮对话
+print("--- 第一轮：查北京用户 ---")
+q1 = "帮我查一下北京的用户"
+sql1 = generate_sql(q1, schema)
+res1, _ = safe_execute_sql(sql1)
+print("查询结果：", res1)
 
-# 第一次尝试
-sql_v1 = generate_sql(query, wrong_schema)
-result_v1, success_v1 = safe_execute_sql(sql_v1)
-
-if not success_v1:
-    print(f"发现报错：{result_v1}，正在让大模型自我纠正...")
-    # 把报错信息发回去，让它重写
-    sql_v2 = generate_sql(query, "表名: users, 字段: id, name, age, city", error_msg=result_v1)
-    result_v2, success_v2 = safe_execute_sql(sql_v2)
-    print("纠正后的最终结果：", result_v2)
-else:
-    print("查询结果：", result_v1)
+print("\n--- 第二轮：追问上海用户（考验记忆） ---")
+q2 = "那上海的呢？"  # 这里故意不说“查一下上海的用户”，只说“那...呢”
+sql2 = generate_sql(q2, schema)
+res2, _ = safe_execute_sql(sql2)
+print("查询结果：", res2)
